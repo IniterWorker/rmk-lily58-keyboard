@@ -2,7 +2,7 @@
 #![no_main]
 
 #[macro_use]
-mod macros;
+mod common;
 
 use defmt::*;
 use defmt_rtt as _;
@@ -20,9 +20,8 @@ use rmk::{
     channel::EVENT_CHANNEL, debounce::default_debouncer::DefaultDebouncer, futures::future::join,
     matrix::Matrix, run_devices, split::peripheral::run_rmk_split_peripheral,
 };
-use ws2812::{Rgb, Ws2812};
 
-mod ws2812;
+use common::light::{Rgb, Ws2812};
 
 bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;

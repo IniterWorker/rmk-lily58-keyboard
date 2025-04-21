@@ -7,6 +7,7 @@ pub(crate) const NUM_LAYER: usize = 4;
 // TODO: I am using vial.
 // See: vil-files
 #[rustfmt::skip]
+#[allow(dead_code)] // some kind of issue with the clippy linter and the paths.
 pub const fn get_default_keymap() -> [[[KeyAction; COL]; ROW]; NUM_LAYER] {
     [
         [

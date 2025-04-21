@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
 
-#[macro_use]
-mod macros;
-mod keymap;
 mod vial;
-mod ws2812;
+
+#[macro_use]
+mod common;
 
 use defmt::info;
 use defmt_rtt as _;
@@ -40,8 +39,11 @@ use rmk::{
     split::central::{run_peripheral_manager, CentralMatrix},
 };
 
+use common::{
+    keymap,
+    light::{Rgb, Ws2812},
+};
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
-use ws2812::{Rgb, Ws2812};
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -68,9 +70,9 @@ async fn main(spawner: Spawner) {
     interrupt::CLOCK_POWER.set_priority(interrupt::Priority::P2);
     let p = embassy_nrf::init(nrf_config);
 
-    info!("Enabling ext hfosc...");
-    ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
-    while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
+    // info!("Enabling ext hfosc...");
+    // ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
+    // while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
 
     let mut config = pwm::Config::default();
     config.sequence_load = SequenceLoad::Common;
