@@ -4,8 +4,8 @@
 #[macro_use]
 mod macros;
 mod keymap;
-mod led;
 mod vial;
+mod ws2812;
 
 use defmt::info;
 use defmt_rtt as _;
@@ -15,10 +15,10 @@ use embassy_nrf::{
     gpio::{AnyPin, Input, Output},
     interrupt::{self, InterruptExt, Priority},
     peripherals::{self, SAADC},
+    pwm::{self, Prescaler, SequenceLoad, SequencePwm},
     saadc::{self, AnyInput, Input as _, Saadc},
     usb::{self, vbus_detect::SoftwareVbusDetect, Driver},
 };
-use led::led_task;
 use panic_probe as _;
 use rmk::{
     ble::SOFTWARE_VBUS,
@@ -41,6 +41,7 @@ use rmk::{
 };
 
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
+use ws2812::{Rgb, Ws2812};
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -67,19 +68,24 @@ async fn main(spawner: Spawner) {
     interrupt::CLOCK_POWER.set_priority(interrupt::Priority::P2);
     let p = embassy_nrf::init(nrf_config);
 
-    // Led
-    let mut led_strip = Output::new(
-        AnyPin::from(p.P0_06),
-        embassy_nrf::gpio::Level::Low,
-        embassy_nrf::gpio::OutputDrive::Standard,
-    );
+    info!("Enabling ext hfosc...");
+    ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
+    while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
 
-    led_task(&mut led_strip);
+    let mut config = pwm::Config::default();
+    config.sequence_load = SequenceLoad::Common;
+    config.prescaler = Prescaler::Div1;
+    config.max_duty = 20; // 1.25us (1s / 16Mhz * 20)
 
-    // Disable external HF clock by default, reduce power consumption
-    // info!("Enabling ext hfosc...");
-    // ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
-    // while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
+    const NUM_LEDS: usize = 63;
+    const N24: usize = NUM_LEDS * 24;
+    const LEN: usize = N24 + 1;
+
+    let pwm = SequencePwm::new_1ch(p.PWM0, p.P0_06, config).unwrap();
+    let mut strip = Ws2812::<NUM_LEDS, N24, LEN>::new(pwm);
+
+    let colors = [Rgb(10, 0, 0); NUM_LEDS];
+    strip.show(&colors).await;
 
     // Usb config
     let software_vbus = SOFTWARE_VBUS.get_or_init(|| SoftwareVbusDetect::new(true, false));

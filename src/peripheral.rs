@@ -12,6 +12,7 @@ use embassy_nrf::{
     gpio::{AnyPin, Input, Output},
     interrupt::{self, InterruptExt, Priority},
     peripherals::SAADC,
+    pwm::{self},
     saadc::{self, AnyInput, Input as _, Saadc},
 };
 use panic_probe as _;
@@ -19,6 +20,9 @@ use rmk::{
     channel::EVENT_CHANNEL, debounce::default_debouncer::DefaultDebouncer, futures::future::join,
     matrix::Matrix, run_devices, split::peripheral::run_rmk_split_peripheral,
 };
+use ws2812::{Rgb, Ws2812};
+
+mod ws2812;
 
 bind_interrupts!(struct Irqs {
     SAADC => saadc::InterruptHandler;
@@ -42,10 +46,26 @@ async fn main(spawner: Spawner) {
     nrf_config.time_interrupt_priority = Priority::P3;
     interrupt::CLOCK_POWER.set_priority(interrupt::Priority::P2);
     let p = embassy_nrf::init(nrf_config);
-    // Disable external HF clock by default, reduce power consumption
+
     // info!("Enabling ext hfosc...");
     // ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
     // while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
+
+    // Led
+    let mut config = pwm::Config::default();
+    config.sequence_load = pwm::SequenceLoad::Common;
+    config.prescaler = pwm::Prescaler::Div1;
+    config.max_duty = 20; // 1.25us (1s / 16Mhz * 20)
+
+    const NUM_LEDS: usize = 63;
+    const N24: usize = NUM_LEDS * 24;
+    const LEN: usize = N24 + 1;
+
+    let pwm = pwm::SequencePwm::new_1ch(p.PWM0, p.P0_06, config).unwrap();
+    let mut strip = Ws2812::<NUM_LEDS, N24, LEN>::new(pwm);
+
+    let colors = [Rgb(10, 0, 0); NUM_LEDS];
+    strip.show(&colors).await;
 
     // Initialize the ADC. We are only using one channel for detecting battery level
     let adc_pin = p.P0_05.degrade_saadc();

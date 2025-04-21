@@ -1,6 +1,6 @@
-# RMK 
+# RMK Lily58 Keyboard
 
-RMK is a feature-rich and easy-to-use keyboard firmware.
+Based on RMK, the PCB is based on Lily58_Pro called Pandakb or Minifuny.
 
 ## uf2 support
 

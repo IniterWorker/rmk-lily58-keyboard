@@ -1,16 +1,15 @@
 [package]
 name = "rmk-lily58-keyboard"
 version = "0.1.0"
-authors = ["Haobo Gu <haobogu@outlook.com>"]
-description = "Keyboard firmware written in Rust"
-homepage = "https://github.com/haobogu/rmk"
-repository = "https://github.com/haobogu/rmk"
-readme = "../../README.md"
+authors = ["Walter Bonetti <walter.bonetti@epitech.eu>"]
+description = "Keyboard firmware written in Rust for Lily58"
+homepage = "https://github.com/IniterWorker/rmk-lily58-keyboard"
+repository = "https://github.com/IniterWorker/rmk-lily58-keyboard"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-rmk = { version = "0.6", default-features = false, features = [
+rmk = { version = "0.6.1", default-features = false, features = [
     "col2row",
     "defmt",
     "nrf52840_ble",
@@ -40,7 +39,9 @@ embassy-futures = { version = "0.1", features = ["defmt"] }
 defmt = "0.3"
 defmt-rtt = "0.4"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
+embedded-dma = "0.2.0"
 embedded-hal = "1.0.0"
+smart-leds-trait = "0.3"
 
 [patch.crates-io]
 nrf-softdevice = { version = "0.1.0", git = "https://github.com/embassy-rs/nrf-softdevice", rev = "b53991e" }
@@ -48,7 +49,7 @@ nrf-softdevice = { version = "0.1.0", git = "https://github.com/embassy-rs/nrf-s
 [build-dependencies]
 xz2 = "0.1.7"
 json = "0.12"
-const-gen = "1.6"
+const-gen = "1.6.6"
 
 # Split keyboard example
 [[bin]]
