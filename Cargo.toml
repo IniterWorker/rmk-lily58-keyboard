@@ -2,11 +2,15 @@
 name = "rmk-lily58-keyboard"
 version = "0.1.0"
 authors = ["Walter Bonetti <walter.bonetti@epitech.eu>"]
-description = "Keyboard firmware written in Rust for Lily58"
-homepage = "https://github.com/IniterWorker/rmk-lily58-keyboard"
-repository = "https://github.com/IniterWorker/rmk-lily58-keyboard"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+description = "Rust-based firmware for the Lily58 Pro keyboard using RMK and nRF52840"
+homepage = "https://github.com/IniterWorker/rmk-lily58-keyboard"
+repository = "https://github.com/IniterWorker/rmk-lily58-keyboard"
+keywords = ["keyboard", "firmware", "lily58", "nrf52840", "rmk", "rust"]
+categories = ["embedded", "hardware-support", "no-std", "firmware"]
+readme = "README.md"
 
 [dependencies]
 rmk = { version = "0.6.1", default-features = false, features = [

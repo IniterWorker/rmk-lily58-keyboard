@@ -1,6 +1,6 @@
 # RMK Lily58 Keyboard
 
-Based on RMK, the PCB is based on Lily58_Pro called Pandakb or Minifuny.
+Based on RMK and nrf52840, Lily58_Pro PCB (also called Pandakb or Minifuny).
 
 ## uf2 support
 
