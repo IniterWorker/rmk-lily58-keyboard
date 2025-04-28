@@ -79,6 +79,14 @@ fn init_adc(adc_pin: AnyInput, adc: Peri<'static, SAADC>) -> Saadc<'static, 1> {
     saadc
 }
 
+fn ble_addr() -> [u8; 6] {
+    let ficr = embassy_nrf::pac::FICR;
+    let high = u64::from(ficr.deviceid(1).read());
+    let addr = high << 32 | u64::from(ficr.deviceid(0).read());
+    let addr = addr | 0x0000_c000_0000_0000;
+    unwrap!(addr.to_le_bytes()[..6].try_into())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Hello RMK BLE!");
@@ -120,9 +128,8 @@ async fn main(spawner: Spawner) {
     let mut sdc_mem = sdc::Mem::<4096>::new();
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
-    let peripheral_addr = [0x7e, 0xfe, 0x73, 0x9e, 0x66, 0xe3];
     let mut resources = HostResources::new();
-    let stack = build_ble_stack(sdc, peripheral_addr, &mut rng_generator, &mut resources).await;
+    let stack = build_ble_stack(sdc, ble_addr(), &mut rng_generator, &mut resources).await;
 
     // Initialize led ws2812
     spawner.must_spawn(led_task(p.PWM0, p.P0_06));
