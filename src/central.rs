@@ -2,56 +2,91 @@
 #![no_main]
 
 mod vial;
-
 #[macro_use]
 mod common;
+use common::keymap;
+use common::light::led_task;
 
-use defmt::info;
-use defmt_rtt as _;
+use defmt::{info, unwrap};
 use embassy_executor::Spawner;
-use embassy_nrf::{
-    self as _, bind_interrupts,
-    gpio::{AnyPin, Input, Output},
-    interrupt::{self, InterruptExt, Priority},
-    peripherals::{self, SAADC},
-    pwm::{self, Prescaler, SequenceLoad, SequencePwm},
-    saadc::{self, AnyInput, Input as _, Saadc},
-    usb::{self, vbus_detect::SoftwareVbusDetect, Driver},
+use embassy_nrf::config::HfclkSource;
+use embassy_nrf::gpio::{Input, Output};
+use embassy_nrf::interrupt::{self, InterruptExt};
+use embassy_nrf::peripherals::{RNG, SAADC, USBD};
+use embassy_nrf::saadc::{self, AnyInput, Input as _, Saadc};
+use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
+use embassy_nrf::usb::Driver;
+use embassy_nrf::{bind_interrupts, rng, usb, Peri};
+use nrf_mpsl::Flash;
+use nrf_sdc::mpsl::MultiprotocolServiceLayer;
+use nrf_sdc::{self as sdc, mpsl};
+use rand_chacha::ChaCha12Rng;
+use rand_core::SeedableRng;
+use rmk::ble::trouble::build_ble_stack;
+use rmk::channel::EVENT_CHANNEL;
+use rmk::config::{
+    BleBatteryConfig, ControllerConfig, KeyboardUsbConfig, RmkConfig, StorageConfig, VialConfig,
 };
-use panic_probe as _;
+use rmk::debounce::default_debouncer::DefaultDebouncer;
+use rmk::futures::future::{join, join4};
+use rmk::input_device::adc::{AnalogEventType, NrfAdc};
+use rmk::input_device::battery::BatteryProcessor;
+use rmk::input_device::Runnable;
+use rmk::keyboard::Keyboard;
+use rmk::light::LightController;
+use rmk::split::ble::central::read_peripheral_addresses;
+use rmk::split::central::{run_peripheral_manager, CentralMatrix};
 use rmk::{
-    ble::SOFTWARE_VBUS,
-    channel::EVENT_CHANNEL,
-    config::{
-        BleBatteryConfig, ControllerConfig, KeyboardUsbConfig, RmkConfig, StorageConfig, VialConfig,
-    },
-    debounce::default_debouncer::DefaultDebouncer,
-    futures::future::{join, join4},
-    initialize_keymap_and_storage, initialize_nrf_sd_and_flash,
-    input_device::{
-        adc::{AnalogEventType, NrfAdc},
-        battery::BatteryProcessor,
-        Runnable,
-    },
-    keyboard::Keyboard,
-    light::LightController,
-    run_devices, run_processor_chain, run_rmk,
-    split::central::{run_peripheral_manager, CentralMatrix},
+    initialize_keymap_and_storage, run_devices, run_processor_chain, run_rmk, HostResources,
 };
-
-use common::{
-    keymap,
-    light::{Rgb, Ws2812},
-};
+use static_cell::StaticCell;
 use vial::{VIAL_KEYBOARD_DEF, VIAL_KEYBOARD_ID};
+use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-    USBD => usb::InterruptHandler<peripherals::USBD>;
+    USBD => usb::InterruptHandler<USBD>;
     SAADC => saadc::InterruptHandler;
+    RNG => rng::InterruptHandler<RNG>;
+    EGU0_SWI0 => nrf_sdc::mpsl::LowPrioInterruptHandler;
+    CLOCK_POWER => nrf_sdc::mpsl::ClockInterruptHandler, usb::vbus_detect::InterruptHandler;
+    RADIO => nrf_sdc::mpsl::HighPrioInterruptHandler;
+    TIMER0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
+    RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
 });
 
+#[embassy_executor::task]
+async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
+    mpsl.run().await
+}
+
+/// How many outgoing L2CAP buffers per link
+const L2CAP_TXQ: u8 = 4;
+
+/// How many incoming L2CAP buffers per link
+const L2CAP_RXQ: u8 = 4;
+
+/// Size of L2CAP packets
+const L2CAP_MTU: usize = 255;
+
+fn build_sdc<'d, const N: usize>(
+    p: nrf_sdc::Peripherals<'d>,
+    rng: &'d mut rng::Rng<RNG>,
+    mpsl: &'d MultiprotocolServiceLayer,
+    mem: &'d mut sdc::Mem<N>,
+) -> Result<nrf_sdc::SoftdeviceController<'d>, nrf_sdc::Error> {
+    sdc::Builder::new()?
+        .support_scan()?
+        .support_central()?
+        .support_adv()?
+        .support_peripheral()?
+        .central_count(1)?
+        .peripheral_count(1)?
+        .buffer_cfg(L2CAP_MTU as u8, L2CAP_MTU as u8, L2CAP_TXQ, L2CAP_RXQ)?
+        .build(p, rng, mpsl, mem)
+}
+
 /// Initializes the SAADC peripheral in single-ended mode on the given pin.
-fn init_adc(adc_pin: AnyInput, adc: SAADC) -> Saadc<'static, 1> {
+fn init_adc(adc_pin: AnyInput, adc: Peri<'static, SAADC>) -> Saadc<'static, 1> {
     // Then we initialize the ADC. We are only using one channel in this example.
     let config = saadc::Config::default();
     let channel_cfg = saadc::ChannelConfig::single_ended(adc_pin.degrade_saadc());
@@ -60,47 +95,73 @@ fn init_adc(adc_pin: AnyInput, adc: SAADC) -> Saadc<'static, 1> {
     saadc
 }
 
+fn ble_addr() -> [u8; 6] {
+    let ficr = embassy_nrf::pac::FICR;
+    let high = u64::from(ficr.deviceid(1).read());
+    let addr = high << 32 | u64::from(ficr.deviceid(0).read());
+    let addr = addr | 0x0000_c000_0000_0000;
+    unwrap!(addr.to_le_bytes()[..6].try_into())
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Hello NRF BLE!");
+    info!("Hello RMK BLE!");
+    // Initialize the peripherals and nrf-sdc controller
     let mut nrf_config = embassy_nrf::config::Config::default();
-    nrf_config.gpiote_interrupt_priority = Priority::P3;
-    nrf_config.time_interrupt_priority = Priority::P3;
-    interrupt::USBD.set_priority(interrupt::Priority::P2);
-    interrupt::CLOCK_POWER.set_priority(interrupt::Priority::P2);
+    nrf_config.dcdc.reg0_voltage = Some(embassy_nrf::config::Reg0Voltage::_3v3);
+    nrf_config.dcdc.reg0 = true;
+    nrf_config.dcdc.reg1 = true;
+
+    // Note: because of the heat of the leds (sk, ws2812...)
+    // You will need to use the external xtal to reduce led timing issue
+    nrf_config.hfclk_source = HfclkSource::ExternalXtal;
+
     let p = embassy_nrf::init(nrf_config);
-
-    // info!("Enabling ext hfosc...");
-    // ::embassy_nrf::pac::CLOCK.tasks_hfclkstart().write_value(1);
-    // while ::embassy_nrf::pac::CLOCK.events_hfclkstarted().read() != 1 {}
-
-    let mut config = pwm::Config::default();
-    config.sequence_load = SequenceLoad::Common;
-    config.prescaler = Prescaler::Div1;
-    config.max_duty = 20; // 1.25us (1s / 16Mhz * 20)
-
-    const NUM_LEDS: usize = 63;
-    const N24: usize = NUM_LEDS * 24;
-    const LEN: usize = N24 + 1;
-
-    let pwm = SequencePwm::new_1ch(p.PWM0, p.P0_06, config).unwrap();
-    let mut strip = Ws2812::<NUM_LEDS, N24, LEN>::new(pwm);
-
-    let colors = [Rgb(10, 0, 0); NUM_LEDS];
-    strip.show(&colors).await;
-
-    // Usb config
-    let software_vbus = SOFTWARE_VBUS.get_or_init(|| SoftwareVbusDetect::new(true, false));
-    let driver = Driver::new(p.USBD, Irqs, software_vbus);
-
-    // Initialize the ADC. We are only using one channel for detecting battery level
-    let adc_pin = p.P0_05.degrade_saadc();
-    let is_charging_pin = Input::new(AnyPin::from(p.P0_07), embassy_nrf::gpio::Pull::Up);
-    let charging_led = Output::new(
-        AnyPin::from(p.P0_08),
-        embassy_nrf::gpio::Level::Low,
-        embassy_nrf::gpio::OutputDrive::Standard,
+    let mpsl_p =
+        mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let lfclk_cfg = mpsl::raw::mpsl_clock_lfclk_cfg_t {
+        source: mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
+        rc_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
+        rc_temp_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+        accuracy_ppm: mpsl::raw::MPSL_DEFAULT_CLOCK_ACCURACY_PPM as u16,
+        skip_wait_lfclk_started: mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
+    };
+    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
+    static SESSION_MEM: StaticCell<mpsl::SessionMem<1>> = StaticCell::new();
+    let mpsl = MPSL.init(unwrap!(mpsl::MultiprotocolServiceLayer::with_timeslots(
+        mpsl_p,
+        Irqs,
+        lfclk_cfg,
+        SESSION_MEM.init(mpsl::SessionMem::new())
+    )));
+    spawner.must_spawn(mpsl_task(&*mpsl));
+    let sdc_p = sdc::Peripherals::new(
+        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
+        p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
+    let mut rng = rng::Rng::new(p.RNG, Irqs);
+    let mut rng_gen = ChaCha12Rng::from_rng(&mut rng).unwrap();
+    let mut sdc_mem = sdc::Mem::<8192>::new();
+    let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
+    let mut host_resources = HostResources::new();
+    let stack = build_ble_stack(sdc, ble_addr(), &mut rng_gen, &mut host_resources).await;
+
+    // Initialize led ws2812
+    spawner.must_spawn(led_task(p.PWM0, p.P0_06));
+
+    // Initialize usb driver
+    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+
+    // Initialize flash
+    let flash = Flash::take(mpsl, p.NVMC);
+
+    // Initialize IO Pins
+    let (input_pins, output_pins) = config_matrix_pins_nrf!(peripherals: p, input: [P0_24, P1_00, P0_11, P1_04, P1_06], output:  [P0_02, P1_15, P1_13, P1_11, P0_10, P0_09]);
+
+    // Initialize the ADC.
+    // We are only using one channel for detecting battery level
+    let adc_pin = p.P0_05.degrade_saadc();
+    let is_charging_pin = Input::new(p.P0_07, embassy_nrf::gpio::Pull::Up);
     let saadc = init_adc(adc_pin, p.SAADC);
     // Wait for ADC calibration.
     saadc.calibrate().await;
@@ -114,12 +175,11 @@ async fn main(spawner: Spawner) {
         serial_number: "vial:f64c2b3c:000001",
     };
     let vial_config = VialConfig::new(VIAL_KEYBOARD_ID, VIAL_KEYBOARD_DEF);
-    let ble_battery_config =
-        BleBatteryConfig::new(Some(is_charging_pin), true, Some(charging_led), false);
+    let ble_battery_config = BleBatteryConfig::new(Some(is_charging_pin), true, None, false);
     let storage_config = StorageConfig {
-        start_addr: 0,
+        start_addr: 0xA0000, // FIXME: use 0x70000 after we can build without softdevice controller
         num_sectors: 6,
-        clear_storage: false,
+        ..Default::default()
     };
     let rmk_config = RmkConfig {
         usb_config: keyboard_usb_config,
@@ -129,20 +189,10 @@ async fn main(spawner: Spawner) {
         ..Default::default()
     };
 
-    let (input_pins, output_pins) = config_matrix_pins_nrf!(peripherals: p, input: [P0_24, P1_00, P0_11, P1_04, P1_06], output:  [P0_02, P1_15, P1_13, P1_11, P0_10, P0_09]);
-
-    // Initialize the Softdevice and flash
-    let central_addr = [0x18, 0xe2, 0x21, 0x80, 0xc0, 0xc7];
-    let peripheral_addr = [0x7e, 0xfe, 0x73, 0x9e, 0x66, 0xe3];
-    let (sd, flash) = initialize_nrf_sd_and_flash(
-        rmk_config.usb_config.product_name,
-        spawner,
-        Some(central_addr),
-    );
-
+    // Initialze keyboard stuffs
     // Initialize the storage and keymap
     let mut default_keymap = keymap::get_default_keymap();
-    let (keymap, storage) = initialize_keymap_and_storage(
+    let (keymap, mut storage) = initialize_keymap_and_storage(
         &mut default_keymap,
         flash,
         rmk_config.storage_config,
@@ -150,16 +200,25 @@ async fn main(spawner: Spawner) {
     )
     .await;
 
-    // Initialize the matrix + keyboard
+    // Initialize the matrix and keyboard
     let debouncer = DefaultDebouncer::<5, 6>::new();
     let mut matrix = CentralMatrix::<_, _, _, 0, 0, 5, 6>::new(input_pins, output_pins, debouncer);
+    // let mut matrix = TestMatrix::<ROW, COL>::new();
     let mut keyboard = Keyboard::new(&keymap, rmk_config.behavior_config.clone());
 
+    // Read peripheral address from storage
+    let peripheral_addrs = read_peripheral_addresses::<1, _, 10, 6, 4, 0>(&mut storage).await;
+
     // Initialize the light controller
-    let light_controller: LightController<Output> =
+    let mut light_controller: LightController<Output> =
         LightController::new(ControllerConfig::default().light_config);
 
-    let mut adc_device = NrfAdc::new(saadc, [AnalogEventType::Battery], 12000, None);
+    let mut adc_device = NrfAdc::new(
+        saadc,
+        [AnalogEventType::Battery],
+        embassy_time::Duration::from_secs(12),
+        None,
+    );
     let mut batt_proc = BatteryProcessor::new(2000, 2806, &keymap);
 
     // Start
@@ -172,8 +231,15 @@ async fn main(spawner: Spawner) {
         },
         keyboard.run(),
         join(
-            run_peripheral_manager::<5, 6, 5, 0>(0, peripheral_addr),
-            run_rmk(&keymap, driver, storage, light_controller, rmk_config, sd),
+            run_peripheral_manager::<5, 6, 5, 0, _>(0, peripheral_addrs[0], &stack),
+            run_rmk(
+                &keymap,
+                driver,
+                &stack,
+                &mut storage,
+                &mut light_controller,
+                rmk_config,
+            ),
         ),
     )
     .await;
