@@ -2,6 +2,8 @@
 
 Based on RMK and nrf52840, Lily58_Pro PCB (also called Pandakb or Minifuny).
 
+![Keyboard](./keyboard.jpg)
+
 ## uf2 support
 
 If you’re using the Adafruit_nRF52_Bootloader (pre-installed on the nice!nano), you’re in luck! This bootloader supports the .uf2 firmware format, which eliminates the need for a debugging probe to flash your firmware. RMK uses the `cargo-make` tool to generate .uf2 firmware, with the generation process defined in the `Makefile.toml`.
