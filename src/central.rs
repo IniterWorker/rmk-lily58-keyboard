@@ -12,11 +12,13 @@ use embassy_executor::Spawner;
 use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::{Input, Output};
 use embassy_nrf::interrupt::{self, InterruptExt};
+use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::{RNG, SAADC, USBD};
 use embassy_nrf::saadc::{self, AnyInput, Input as _, Saadc};
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::Driver;
 use embassy_nrf::{bind_interrupts, rng, usb, Peri};
+use embassy_time::Duration;
 use nrf_mpsl::Flash;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
@@ -25,7 +27,8 @@ use rand_core::SeedableRng;
 use rmk::ble::trouble::build_ble_stack;
 use rmk::channel::EVENT_CHANNEL;
 use rmk::config::{
-    BleBatteryConfig, ControllerConfig, KeyboardUsbConfig, RmkConfig, StorageConfig, VialConfig,
+    BehaviorConfig, BleBatteryConfig, ControllerConfig, KeyboardUsbConfig, RmkConfig,
+    StorageConfig, VialConfig,
 };
 use rmk::debounce::default_debouncer::DefaultDebouncer;
 use rmk::futures::future::{join, join4};
@@ -66,11 +69,11 @@ const L2CAP_TXQ: u8 = 4;
 const L2CAP_RXQ: u8 = 4;
 
 /// Size of L2CAP packets
-const L2CAP_MTU: usize = 255;
+const L2CAP_MTU: usize = 251;
 
 fn build_sdc<'d, const N: usize>(
     p: nrf_sdc::Peripherals<'d>,
-    rng: &'d mut rng::Rng<RNG>,
+    rng: &'d mut rng::Rng<RNG, Async>,
     mpsl: &'d MultiprotocolServiceLayer,
     mem: &'d mut sdc::Mem<N>,
 ) -> Result<nrf_sdc::SoftdeviceController<'d>, nrf_sdc::Error> {
@@ -79,9 +82,14 @@ fn build_sdc<'d, const N: usize>(
         .support_central()?
         .support_adv()?
         .support_peripheral()?
+        .support_dle_peripheral()?
+        .support_dle_central()?
+        .support_phy_update_central()?
+        .support_phy_update_peripheral()?
+        .support_le_2m_phy()?
         .central_count(1)?
         .peripheral_count(1)?
-        .buffer_cfg(L2CAP_MTU as u8, L2CAP_MTU as u8, L2CAP_TXQ, L2CAP_RXQ)?
+        .buffer_cfg(L2CAP_MTU as u16, L2CAP_MTU as u16, L2CAP_TXQ, L2CAP_RXQ)?
         .build(p, rng, mpsl, mem)
 }
 
@@ -108,7 +116,7 @@ async fn main(spawner: Spawner) {
     info!("Hello RMK BLE!");
     // Initialize the peripherals and nrf-sdc controller
     let mut nrf_config = embassy_nrf::config::Config::default();
-    nrf_config.dcdc.reg0_voltage = Some(embassy_nrf::config::Reg0Voltage::_3v3);
+    nrf_config.dcdc.reg0_voltage = Some(embassy_nrf::config::Reg0Voltage::_3V3);
     nrf_config.dcdc.reg0 = true;
     nrf_config.dcdc.reg1 = true;
 
@@ -192,11 +200,18 @@ async fn main(spawner: Spawner) {
     // Initialze keyboard stuffs
     // Initialize the storage and keymap
     let mut default_keymap = keymap::get_default_keymap();
+    let mut behavior_config = BehaviorConfig::default();
+    behavior_config.tap_hold.enable_hrm = true;
+    behavior_config.tap_hold.permissive_hold = true;
+    behavior_config.tap_hold.chordal_hold = true;
+    behavior_config.tap_hold.prior_idle_time = Duration::from_millis(120);
+    behavior_config.tap_hold.hold_timeout = Duration::from_millis(250);
+
     let (keymap, mut storage) = initialize_keymap_and_storage(
         &mut default_keymap,
         flash,
-        rmk_config.storage_config,
-        rmk_config.behavior_config.clone(),
+        &rmk_config.storage_config,
+        behavior_config,
     )
     .await;
 
@@ -204,7 +219,7 @@ async fn main(spawner: Spawner) {
     let debouncer = DefaultDebouncer::<5, 6>::new();
     let mut matrix = CentralMatrix::<_, _, _, 0, 0, 5, 6>::new(input_pins, output_pins, debouncer);
     // let mut matrix = TestMatrix::<ROW, COL>::new();
-    let mut keyboard = Keyboard::new(&keymap, rmk_config.behavior_config.clone());
+    let mut keyboard = Keyboard::new(&keymap);
 
     // Read peripheral address from storage
     let peripheral_addrs = read_peripheral_addresses::<1, _, 10, 6, 4, 0>(&mut storage).await;

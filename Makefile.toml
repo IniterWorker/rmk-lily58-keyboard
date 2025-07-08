@@ -2,7 +2,9 @@
 install_crate = { rustup_component_name = "llvm-tools" }
 
 [tasks.flip-link]
-install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = ["-h"] }
+install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = [
+    "-h",
+] }
 
 [tasks.objcopy-central]
 install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
@@ -76,3 +78,53 @@ dependencies = ["objcopy-peripheral"]
 
 [tasks.uf2]
 dependencies = ["uf2-central", "uf2-peripheral"]
+
+[tasks.central-flash]
+description = "Mount, copy, and flash the central UF2 file to the nRF device via sudo (alternative entrypoint)"
+script = [
+    '''
+    set -e
+    DEVICE=$(lsblk -o NAME,LABEL | grep -i NICENANO | awk '{print $1}' | head -n1)
+    if [ -z "$DEVICE" ]; then
+        echo "NICENANO device not found. Please insert the device and try again."
+        exit 1
+    fi
+    DEV_PATH="/dev/$DEVICE"
+    MOUNT_POINT="/mnt/nicenano-uf2"
+    sudo mkdir -p "$MOUNT_POINT"
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        sudo mount "$DEV_PATH" "$MOUNT_POINT"
+    fi
+    echo "Flashing rmk-lily58-keyboard-central.uf2 to $MOUNT_POINT"
+    sudo cp rmk-lily58-keyboard-central.uf2 "$MOUNT_POINT/"
+    sync
+    echo "Flash complete."
+    sudo umount "$MOUNT_POINT"
+    ''',
+]
+dependencies = ["uf2-central"]
+
+[tasks.peripheral-flash]
+description = "Mount, copy, and flash the peripheral UF2 file to the nRF device via sudo"
+script = [
+    '''
+    set -e
+    DEVICE=$(lsblk -o NAME,LABEL | grep -i NICENANO | awk '{print $1}' | head -n1)
+    if [ -z "$DEVICE" ]; then
+        echo "NICENANO device not found. Please insert the device and try again."
+        exit 1
+    fi
+    DEV_PATH="/dev/$DEVICE"
+    MOUNT_POINT="/mnt/nicenano-uf2"
+    sudo mkdir -p "$MOUNT_POINT"
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        sudo mount "$DEV_PATH" "$MOUNT_POINT"
+    fi
+    echo "Flashing rmk-lily58-keyboard-peripheral.uf2 to $MOUNT_POINT"
+    sudo cp rmk-lily58-keyboard-peripheral.uf2 "$MOUNT_POINT/"
+    sync
+    echo "Flash complete."
+    sudo umount "$MOUNT_POINT"
+    ''',
+]
+dependencies = ["uf2-peripheral"]
